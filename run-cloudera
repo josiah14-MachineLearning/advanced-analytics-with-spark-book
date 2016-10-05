@@ -1,0 +1,1 @@
+sudo docker run --hostname=quickstart.cloudera --privileged=true -it -p 8888:8888 -p 7180:7180 -p 80:80 -v /home/josiah/Development/cloudera/advanced-analytics-with-spark-book:/advanced-analytics-with-spark-book cloudera/quickstart:latest /usr/bin/docker-quickstart
