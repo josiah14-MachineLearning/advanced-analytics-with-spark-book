@@ -24,8 +24,16 @@ object Main {
         }
       }
     }
-
+    val rawArtistAlias = sc.textFile("hdfs:///user/josiah/profiledata_06-May-2005/artist_alias.txt", 8)
+    val artistAlias = rawArtistAlias.flatMap { line =>
+      val tokens = line.split('\t')
+      tokens(0).isEmpty match {
+        case true  => None
+        case false => Some(tokens(0).toInt, tokens(1).toInt)
+      }
+    }.collectAsMap()
     println(artistById.lookup(6803336).head)
+    println(artistById.lookup(1000010).head)
 
     sc.stop()
   }
