@@ -22,6 +22,11 @@ object Main {
     val rawArtistData: RDD[String] =
       sc.textFile("hdfs:///user/josiah/profiledata_06-May-2005/artist_data.txt", 16)
 
+    /***************************************************************************
+     * For each artist (id, name) pair, ensure a `name` is available and the
+     * `id` is a valid Integer. Use the `Option` type to indicate `name`
+     * presence.
+     */
     val artistById: RDD[(Int, String)] = rawArtistData.flatMap { line =>
       val (id: String, name: String) = line.span(_ != '\t')
       name.isEmpty match {
@@ -38,10 +43,22 @@ object Main {
       }
     }
 
+    /***************************************************************************
+     * Maps irregular artist ID to misspelled/irregular artist names to the ID
+     * of the artist's "canonical" name. It has both artist ID's in each line
+     * and is tab delimited.
+     */
     val rawArtistAlias: RDD[StringOps] =
       sc.textFile("hdfs:///user/josiah/profiledata_06-May-2005/artist_alias.txt", 16)
         .map(augmentString(_))
 
+    /***************************************************************************
+     * Some lines are missing the first Artist ID.  Use the `Option` type to
+     * indicate whether the first ID is present.
+     *
+     * Also, collect as a Map to 'map' "bad" artist IDs to their "true" ones.
+     * The `collectAsMap` function skips `None` values.
+     */
     val artistAlias: Map[Int, Int] = rawArtistAlias.flatMap { line =>
       val tokens: ArrayOps[StringOps] =
         refArrayOps(line.split('\t')).map(s => augmentString(s))
@@ -52,8 +69,35 @@ object Main {
       }
     }.collectAsMap()
 
+    /***************************************************************************
+     * Begin building the Model.  First, convert all artist IDs to their
+     * canonical ID. Because of the MLlib API, artists will be referred to as
+     * "products".  users remain "users".
+     **************************************************************************/
+
+    /***************************************************************************
+     * "Broadcast" the "bad" -> "good" ID mapping to make it available to all
+     * of the Spark tasks as a shared immutable on each executor (each executor
+     * gets its own copy).
+     *
+     * (Thousands of tasks per executor may run, but the number of executors
+     * tends to be small).
+     */
     val bArtistAlias: Broadcast[Map[Int, Int]] = sc.broadcast(artistAlias)
 
+    /***************************************************************************
+     * For all records in the `userArtistData` scores data, convert the "bad"
+     * artist IDs to "good" ones and return the results as a distributed
+     * collection of mllib.recommendation.Ratings.
+     *
+     * The result should be cached because the ALS algorithm is iterative and
+     * will need access to this training data many times.  `cache`ing reduces
+     * the chances that Spark will have to recompute the data set each time it
+     * is accessed by the ALS algorithm.
+     *
+     * Use the Storage tab in the Spark UI to see how much of the RDD is cached
+     * and its impact on the RAM usage.
+     */
     val trainData: RDD[Rating] = rawUserArtistData.map { line =>
       val Array(userId: Int, artistId: Int, count: Int) =
         line.split(' ').map(_.toInt)
@@ -61,6 +105,8 @@ object Main {
       Rating(userId, finalArtistId, count.toDouble)
     }.cache()
 
+    // 10 features for each user and artist, the rest of the numbers are unexplained,
+    // but are parameters for tuning the execution of the ALS algorithm.
     val model: MatrixFactorizationModel = ALS.trainImplicit(trainData, 10, 5, 0.01, 1.0)
 
     println("ARTIST" + artistById.lookup(6803336).head)

@@ -1,1 +1,1 @@
-spark-submit --executor-memory 10G --num-executors 4 --executor-cores 2 target/scala-2.10/recommending-music-using-als-collaborative-filtering_2.10-1.0.jar
+spark-submit --executor-memory 12G --num-executors 4 --executor-cores 2 target/scala-2.10/recommending-music-using-als-collaborative-filtering_2.10-1.0.jar
