@@ -111,7 +111,9 @@ object Main {
 
     println("ARTIST" + artistById.lookup(6803336).head)
     println("ARTIST" + artistById.lookup(1000010).head)
-    println("FEATURES" + model.userFeatures.mapValues(_.mkString(", ")).first())
+    val newModel = model.userFeatures.mapValues(_.mkString(", ")).cache()
+    println("FEATURES" + newModel.first())
+    newModel.top(10).foreach(println(_))
 
     sc.stop()
   }
