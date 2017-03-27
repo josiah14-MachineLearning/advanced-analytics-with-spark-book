@@ -30,15 +30,15 @@ object Main {
     val artistById: RDD[(Int, String)] = rawArtistData.flatMap { line =>
       val (id: String, name: String) = line.span(_ != '\t')
       name.isEmpty match {
-        case true  => option2Iterable(None)
+        case true  => None
         case false => {
           val result: Try[Option[(Int, String)]] =
-            Try(Some((augmentString(id).toInt, name.trim))) recoverWith {
+            Try(Some((id.toInt, name.trim))) recoverWith {
               e: Throwable => e match {
                 case e: NumberFormatException => Success(None)
                 case e: Throwable             => Failure(e)
             }}
-          option2Iterable(result.get)
+          result.get
         }
       }
     }
@@ -50,7 +50,7 @@ object Main {
      */
     val rawArtistAlias: RDD[StringOps] =
       sc.textFile("hdfs:///user/josiah/profiledata_06-May-2005/artist_alias.txt", 16)
-        .map(augmentString(_))
+        .map(augmentString)
 
     /***************************************************************************
      * Some lines are missing the first Artist ID.  Use the `Option` type to
@@ -60,12 +60,11 @@ object Main {
      * The `collectAsMap` function skips `None` values.
      */
     val artistAlias: Map[Int, Int] = rawArtistAlias.flatMap { line =>
-      val tokens: ArrayOps[StringOps] =
-        refArrayOps(line.split('\t')).map(s => augmentString(s))
+      val tokens: ArrayOps[StringOps] = line.split('\t').map(augmentString)
 
       tokens(0).isEmpty match {
-        case true  => option2Iterable(None)
-        case false => option2Iterable(Some((tokens(0).toInt, tokens(1).toInt)))
+        case true  => None
+        case false => Some((tokens(0).toInt, tokens(1).toInt))
       }
     }.collectAsMap()
 
@@ -113,7 +112,25 @@ object Main {
     println("ARTIST" + artistById.lookup(1000010).head)
     val newModel = model.userFeatures.mapValues(_.mkString(", ")).cache()
     println("FEATURES" + newModel.first())
-    newModel.top(10).foreach(println(_))
+    newModel.top(10).foreach(println)
+
+    // For user 2093760, find all of the artists s/he rated.
+
+    val rawArtistsForUser: RDD[Rating] = trainData.filter {
+      case Rating(user, _, _) => user == 2093760
+    }
+
+    val existingProducts: Set[Int] = rawArtistsForUser.map {
+      case Rating(_, artist, _) => artist
+    }.collect().toSet
+
+    artistById.filter { case (id, name) =>
+      existingProducts.contains(id)
+    }.values.collect().foreach(println)
+
+    // And then recommend 5 new artists for user 2093760.
+    val recommendations = model.recommendProducts(2093760, 5)
+    recommendations.foreach(println)
 
     sc.stop()
   }
