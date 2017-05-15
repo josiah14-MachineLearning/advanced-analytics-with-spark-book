@@ -1,4 +1,5 @@
 import org.apache.spark._
+import org.apache.spark.util.StatCounter
 import org.apache.spark.rdd.RDD
 import org.apache.spark.broadcast.Broadcast
 import scala.util.{Try, Success, Failure}
@@ -10,17 +11,17 @@ import scala.Option.option2Iterable
 import scala.{Array, Option}
 
 object Main {
-  def main(args: Array[String]) {
-    val conf: SparkConf = new SparkConf()
-        .setAppName("Recommending Music Using ALS Collaborative Filtering")
-        .setMaster("local")
+  def cleanData(
+      rawUserArtistData: RDD[String],
+      rawArtistData: RDD[String],
+      rawArtistAlias: RDD[StringOps]): (RDD[(Int, String)], Map[Int, Int], RDD[Rating]) = {
 
-    val sc: SparkContext = new SparkContext(conf)
+    val rawUserArtistSplit: RDD[Array[String]] = rawUserArtistData.map(_.split(' '))
+    val userIdStats: StatCounter = rawUserArtistSplit.map(_(0).toDouble).stats()
+    val itemIdStats: StatCounter = rawUserArtistSplit.map(_(1).toDouble).stats()
 
-    val rawUserArtistData: RDD[String] =
-      sc.textFile("hdfs:///user/josiah/profiledata_06-May-2005/user_artist_data.txt", 16)
-    val rawArtistData: RDD[String] =
-      sc.textFile("hdfs:///user/josiah/profiledata_06-May-2005/artist_data.txt", 16)
+    println("USER ID STATS: " + userIdStats)
+    println("ITEM ID STATS: " + itemIdStats)
 
     /***************************************************************************
      * For each artist (id, name) pair, ensure a `name` is available and the
@@ -37,20 +38,11 @@ object Main {
               e: Throwable => e match {
                 case e: NumberFormatException => Success(None)
                 case e: Throwable             => Failure(e)
-            }}
+              }}
           result.get
         }
       }
     }
-
-    /***************************************************************************
-     * Maps irregular artist ID to misspelled/irregular artist names to the ID
-     * of the artist's "canonical" name. It has both artist ID's in each line
-     * and is tab delimited.
-     */
-    val rawArtistAlias: RDD[StringOps] =
-      sc.textFile("hdfs:///user/josiah/profiledata_06-May-2005/artist_alias.txt", 16)
-        .map(augmentString)
 
     /***************************************************************************
      * Some lines are missing the first Artist ID.  Use the `Option` type to
@@ -68,6 +60,39 @@ object Main {
       }
     }.collectAsMap()
 
+    val (badId, goodId) = artistAlias.head
+    println("GOOD ARTIST -> BAD ARTIST")
+    println("----------- || ----------")
+    println(artistById.lookup(badId) + " -> " + artistById.lookup(goodId))
+    println()
+    println("ARTIST" + artistById.lookup(6803336).head)
+    println("ARTIST" + artistById.lookup(1000010).head)
+    /***************************************************************************
+     * For all records in the `userArtistData` scores data, convert the "bad"
+     * artist IDs to "good" ones and return the results as a distributed
+     * collection of mllib.recommendation.Ratings.
+     *
+     * The result should be cached because the ALS algorithm is iterative and
+     * will need access to this training data many times.  `cache`ing reduces
+     * the chances that Spark will have to recompute the data set each time it
+     * is accessed by the ALS algorithm.
+     *
+     * Use the Storage tab in the Spark UI to see how much of the RDD is cached
+     * and its impact on the RAM usage.
+     */
+    val trainingData: RDD[Rating] = rawUserArtistData.map { line =>
+      val Array(userId: Int, artistId: Int, count: Int) = line.split(' ').map(_.toInt)
+      val finalArtistId: Int = bArtistAlias.value.getOrElse(artistId, artistId)
+      Rating(userId, finalArtistId, count.toDouble)
+    }.cache()
+
+    return (artistById, artistAlias, trainingData)
+  }
+
+  def modelData(
+      sc: SparkContext,
+      artistAlias: Map[Int, Int],
+      trainingData: RDD[Rating]) = {
     /***************************************************************************
      * Begin building the Model.  First, convert all artist IDs to their
      * canonical ID. Because of the MLlib API, artists will be referred to as
@@ -84,35 +109,34 @@ object Main {
      */
     val bArtistAlias: Broadcast[Map[Int, Int]] = sc.broadcast(artistAlias)
 
-    /***************************************************************************
-     * For all records in the `userArtistData` scores data, convert the "bad"
-     * artist IDs to "good" ones and return the results as a distributed
-     * collection of mllib.recommendation.Ratings.
-     *
-     * The result should be cached because the ALS algorithm is iterative and
-     * will need access to this training data many times.  `cache`ing reduces
-     * the chances that Spark will have to recompute the data set each time it
-     * is accessed by the ALS algorithm.
-     *
-     * Use the Storage tab in the Spark UI to see how much of the RDD is cached
-     * and its impact on the RAM usage.
-     */
-    val trainData: RDD[Rating] = rawUserArtistData.map { line =>
-      val Array(userId: Int, artistId: Int, count: Int) =
-        line.split(' ').map(_.toInt)
-      val finalArtistId: Int = bArtistAlias.value.getOrElse(artistId, artistId)
-      Rating(userId, finalArtistId, count.toDouble)
-    }.cache()
-
     // 10 features for each user and artist, the rest of the numbers are unexplained,
     // but are parameters for tuning the execution of the ALS algorithm.
-    val model: MatrixFactorizationModel = ALS.trainImplicit(trainData, 10, 5, 0.01, 1.0)
+    val model: MatrixFactorizationModel = ALS.trainImplicit(trainingData, 10, 5, 0.01, 1.0)
+    trainingData.unpersist()
 
-    println("ARTIST" + artistById.lookup(6803336).head)
-    println("ARTIST" + artistById.lookup(1000010).head)
-    val newModel = model.userFeatures.mapValues(_.mkString(", ")).cache()
-    println("FEATURES" + newModel.first())
-    newModel.top(10).foreach(println)
+    val splitModel: RDD[(Int, String)] = model.userFeatures.mapValues(_.mkString(", "))
+    println("FIRST FEATURE ARRAY: " + splitModel.first())
+    splitModel.top(10).foreach(println)
+  }
+
+  def main(args: Array[String]) {
+    val conf: SparkConf = new SparkConf()
+        .setAppName("Recommending Music Using ALS Collaborative Filtering")
+        .setMaster("local")
+    val sc: SparkContext = new SparkContext(conf)
+    val dataDir: String = "hdfs:///user/josiah/profiledata_06-May-2005/"
+    val rawUserArtistData: RDD[String] = sc.textFile(dataDir + "user_artist_data.txt", 16)
+    val rawArtistData: RDD[String] = sc.textFile(dataDir + "artist_data.txt", 16)
+    /***************************************************************************
+     * Maps irregular artist ID to misspelled/irregular artist names to the ID
+     * of the artist's "canonical" name. It has both artist ID's in each line
+     * and is tab delimited.
+     */
+    val rawArtistAlias: RDD[StringOps] = sc.textFile(dataDir + "artist_alias.txt", 16).map(augmentString)
+
+    // (RDD[(Int, String)], Map[Int, Int])
+    val (artistById: RDD[(Int, String)], artistAlias: Map[Int, Int], trainingData: RDD[Rating]) =
+      cleanData(rawUserArtistData, rawArtistData, rawArtistAlias)
 
     // For user 2093760, find all of the artists s/he rated.
 
